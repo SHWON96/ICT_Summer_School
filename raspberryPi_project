@@ -1,0 +1,129 @@
+import RPi.GPIO as GPIO
+import time
+from datetime import date,datetime
+from picamera import PiCamera
+import boto3
+from botocore.client import Config
+from AWSIoTPythonSDK.MQTTLib import AWSIoTMQTTClient
+import json
+
+push_pin=18
+PIRPin=17
+
+GPIO.setmode(GPIO.BCM)
+GPIO.setwarnings(False)
+GPIO.setup(push_pin, GPIO.IN, pull_up_down=GPIO.PUD_DOWN)
+
+# path of image storage
+path = '/home/pi/capture/'
+
+date = ""
+push = 0 # at home
+
+# aws s3 cert and bucket
+ACCESS_KEY_ID = ''
+ACCESS_SECRET_KEY = ''
+BUCKET_NAME = 'my-bucket'
+
+
+
+# capture the camera and save in raspberry Pi
+def camerashot():
+	camera = PiCamera()
+	now = datetime.utcnow()
+	global date
+	date = now.strftime('%Y-%m-%dT%H:%M:%SZ')
+	camera.capture(path+date+".png")
+	print("captured")
+	camera.close()
+	while True:
+		result = uploadimg()
+		if (result):
+			time.sleep(2)
+			print ("emailing..")
+			sendmail()
+			break
+
+# upload captured image to AWS S3
+def uploadimg():
+	link = path + date + ".png"
+	file_name = date+".png"
+	data = open(link, 'rb')
+
+	# S3 Connect
+	s3 = boto3.resource('s3',aws_access_key_id=ACCESS_KEY_ID, aws_secret_access_key=ACCESS_SECRET_KEY,config=Config(signature_version='s3v4'))
+
+	# Image Uploaded
+	s3.Bucket(BUCKET_NAME).put_object(Key=file_name, Body=data, ACL='public-read')
+	print ("Upload done")
+
+	return True
+
+# send mail by using AWS sns notification
+def sendmail():
+	myAWSIoTMQTTClient = AWSIoTMQTTClient("My_Pi_Ko") #clientId can be anything
+	myAWSIoTMQTTClient.configureEndpoint("a7occ33axfhlm-ats.iot.us-east-2.amazonaws.com", 443)
+	myAWSIoTMQTTClient.configureCredentials("/home/pi/aws-iot-device-sdk-embedded-C/certs/root-CA.crt","/home/pi/aws-iot-device-sdk-embedded-C/certs/ad2946d230-private.pem.key","/home/pi/aws-iot-device-sdk-embedded-C/certs/ad2946d230-certificate.pem.crt")
+
+	#AWSIoTMQTTClient connection configuration
+	myAWSIoTMQTTClient.configureAutoReconnectBackoffTime(1, 32, 20)
+	myAWSIoTMQTTClient.configureOfflinePublishQueueing(-1)  # Infinite offline Publish queueing
+	myAWSIoTMQTTClient.configureDrainingFrequency(2)  # Draining: 2 Hz
+	myAWSIoTMQTTClient.configureConnectDisconnectTimeout(10)  # 10 sec
+	myAWSIoTMQTTClient.configureMQTTOperationTimeout(5)  # 5 sec
+	
+	#Connect and subscribe to AWS IoT
+	myAWSIoTMQTTClient.connect()
+	
+
+	message = {}
+	message['default'] = "https://my-pi-img-bucket.s3.eu-west-2.amazonaws.com/" +date+".png"
+	messageJson = json.dumps(message)
+	myAWSIoTMQTTClient.publish("My/test2", messageJson, 1)
+	print('Published topic %s: %s\n' % ("My/test2", messageJson))
+
+
+
+# ready for motion sensor
+def motionsetup():
+	GPIO.setwarnings(False)
+	GPIO.setmode(GPIO.BCM)
+	GPIO.setup(PIRPin,GPIO.IN)
+
+# start motion sensor and start camera when detect motion
+def startmotion():
+	motionsetup()
+	while True:
+		time.sleep(1)
+		if(GPIO.input(PIRPin)==1):
+			print("motion sensored")
+			camerashot()
+		if(GPIO.input(push_pin)==1 and push ==1): # come back home and push button
+		
+			global push
+			push = 0
+			print("come back")
+			time.sleep(2)
+			break
+		else:
+			print("nothing")
+
+
+# main function
+while True:
+	#print ("Starting")
+	if(GPIO.input(push_pin)==1 and push == 0): # go out and push button
+		global push
+		push = 1
+		print("pushed")
+		startmotion()
+	else:
+		print("not pushed")
+		time.sleep(1)
+
+GPIO.cleanup()
+
+
+
+
+
